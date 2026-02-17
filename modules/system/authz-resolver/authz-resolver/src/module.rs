@@ -7,7 +7,7 @@ use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverPluginSpecV1};
 use modkit::Module;
 use modkit::context::ModuleCtx;
 use tracing::info;
-use types_registry_sdk::TypesRegistryClient;
+use types_registry_sdk::{RegisterResult, TypesRegistryClient};
 
 use crate::config::AuthZResolverConfig;
 use crate::domain::{AuthZResolverLocalClient, Service};
@@ -50,7 +50,8 @@ impl Module for AuthZResolver {
         let registry = ctx.client_hub().get::<dyn TypesRegistryClient>()?;
         let schema_str = AuthZResolverPluginSpecV1::gts_schema_with_refs_as_string();
         let schema_json: serde_json::Value = serde_json::from_str(&schema_str)?;
-        let _ = registry.register(vec![schema_json]).await?;
+        let results = registry.register(vec![schema_json]).await?;
+        RegisterResult::ensure_all_ok(&results)?;
         info!(
             schema_id = %AuthZResolverPluginSpecV1::gts_schema_id(),
             "Registered plugin schema in types-registry"
