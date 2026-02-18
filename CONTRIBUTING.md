@@ -423,7 +423,7 @@ ModKit is released as a unified framework:
 
 We use release-plz:
 - Release PRs are labeled `release-plz`.
-- Repository-level `CHANGELOG.md` is the single changelog source. :contentReference[oaicite:3]{index=3}
+- Repository-level `CHANGELOG.md` is the single changelog source.
 - GitHub releases are enabled where configured.
 
 SemVer checks:
