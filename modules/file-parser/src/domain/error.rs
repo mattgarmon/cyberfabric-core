@@ -20,14 +20,11 @@ pub enum DomainError {
     #[error("IO error: {message}")]
     IoError { message: String },
 
-    #[error("Invalid URL: {url}")]
-    InvalidUrl { url: String },
-
-    #[error("Download error: {message}")]
-    DownloadError { message: String },
-
     #[error("Invalid request: {message}")]
     InvalidRequest { message: String },
+
+    #[error("Path traversal blocked: {message}")]
+    PathTraversalBlocked { message: String },
 }
 
 impl DomainError {
@@ -59,18 +56,14 @@ impl DomainError {
         }
     }
 
-    pub fn invalid_url(url: impl Into<String>) -> Self {
-        Self::InvalidUrl { url: url.into() }
-    }
-
-    pub fn download_error(message: impl Into<String>) -> Self {
-        Self::DownloadError {
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self::InvalidRequest {
             message: message.into(),
         }
     }
 
-    pub fn invalid_request(message: impl Into<String>) -> Self {
-        Self::InvalidRequest {
+    pub fn path_traversal_blocked(message: impl Into<String>) -> Self {
+        Self::PathTraversalBlocked {
             message: message.into(),
         }
     }

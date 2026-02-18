@@ -34,6 +34,19 @@ Unified API regardless of input format. Format detection automatic where possibl
 Maximum 50MB per document. Enforced at API layer via body size limits.
 <!-- fdd-id-content -->
 
+### Local Path Security
+
+**ID**: [ ] `p1` `fdd-file-parser-constraint-local-path-security-v1`
+
+<!-- fdd-id-content -->
+Local file parsing (`parse-local`) validates paths before any filesystem access:
+(a) paths containing `..` components are rejected outright;
+(b) the requested path is canonicalized (resolving symlinks);
+(c) the canonical path must be a descendant of the mandatory `allowed_local_base_dir`.
+The module fails to start if `allowed_local_base_dir` is missing or unresolvable.
+Violations return HTTP 403 Forbidden. Rejected attempts are logged at `warn` level.
+<!-- fdd-id-content -->
+
 ### Supported Formats
 
 **ID**: [ ] `p2` `fdd-file-parser-constraint-formats-v1`
@@ -49,7 +62,7 @@ PDF, DOCX, XLSX, PPTX, PNG, JPG, TIFF supported. Other formats rejected with cle
 **ID**: [ ] `p1` `fdd-file-parser-component-rest-v1`
 
 <!-- fdd-id-content -->
-REST endpoints: `/file-parser/v1/info`, `/file-parser/v1/upload`, `/file-parser/v1/upload/markdown`, `/file-parser/v1/parse-local*`, `/file-parser/v1/parse-url*`
+REST endpoints: `/file-parser/v1/info`, `/file-parser/v1/upload`, `/file-parser/v1/upload/markdown`, `/file-parser/v1/parse-local*`
 <!-- fdd-id-content -->
 
 ### Parser Service
@@ -100,13 +113,11 @@ Converts parsed content to Markdown, preserves document structure, handles table
 - Unsupported format → 400 Bad Request
 - File too large → 413 Payload Too Large
 - Parsing failure → 500 Internal Server Error with details
-- URL fetch failure → 502 Bad Gateway
 
 ## 7. Dependencies
 
 - External parsing libraries for format support
 - Temporary file system for processing
-- HTTP client for URL parsing
 
 ## Appendix
 
@@ -115,3 +126,5 @@ Converts parsed content to Markdown, preserves document structure, handles table
 | Date | Version | Author | Changes |
 |------|---------|--------|---------|
 | 2026-02-09 | 0.1.0 | System | Initial DESIGN for cypilot validation |
+| 2026-02-17 | 0.2.0 | Security | Removed `/file-parser/v1/parse-url*` endpoints, HTTP client dependency, URL error handling, and `download_timeout_secs` config. Rationale: SSRF risk (issue #525) — parsing documents from caller-supplied URLs exposed an uncontrolled outbound HTTP path. Decision: remove the capability entirely rather than attempt mitigation. |
+| 2026-02-17 | 0.3.0 | Security | Added path-traversal protections for `parse-local` endpoints: `..` component rejection, path canonicalization, optional `allowed_local_base_dir` enforcement, symlink-escape prevention, and `PathTraversalBlocked` error (HTTP 403). Added constraint `fdd-file-parser-constraint-local-path-security-v1`. Rationale: prevent arbitrary file read via path traversal (issue #525). |

@@ -49,8 +49,8 @@ impl Module for FileParserModule {
         // Load module configuration
         let cfg: FileParserConfig = ctx.config()?;
         debug!(
-            "Loaded file-parser config: max_file_size_mb={}, download_timeout_secs={}",
-            cfg.max_file_size_mb, cfg.download_timeout_secs
+            "Loaded file-parser config: max_file_size_mb={}",
+            cfg.max_file_size_mb
         );
 
         // Build parser backends
@@ -67,18 +67,41 @@ impl Module for FileParserModule {
 
         info!("Registered {} parser backends", parsers.len());
 
+        // allowed_local_base_dir is mandatory — fail fast if missing.
+        let raw_base = cfg.allowed_local_base_dir.ok_or_else(|| {
+            anyhow::anyhow!(
+                "file-parser: 'allowed_local_base_dir' is required but not set. \
+                 Add it to your config under modules.file-parser.config."
+            )
+        })?;
+
+        // Canonicalize at startup so we only do it once.
+        let allowed_local_base_dir = raw_base.canonicalize().map_err(|e| {
+            anyhow::anyhow!(
+                "allowed_local_base_dir '{}' cannot be resolved: {e}",
+                raw_base.display()
+            )
+        })?;
+        if !allowed_local_base_dir.is_dir() {
+            return Err(anyhow::anyhow!(
+                "allowed_local_base_dir '{}' is not a directory",
+                allowed_local_base_dir.display()
+            ));
+        }
+        info!(
+            allowed_local_base_dir = %allowed_local_base_dir.display(),
+            "Local file parsing restricted to base directory"
+        );
+
         // Create service config from module config
         let service_config = ServiceConfig {
             max_file_size_bytes: usize::try_from(cfg.max_file_size_mb * BYTES_IN_MB)
                 .unwrap_or(usize::MAX),
-            download_timeout_secs: cfg.download_timeout_secs,
+            allowed_local_base_dir,
         };
 
         // Create file parser service
-        let file_parser_service = Arc::new(
-            FileParserService::new(parsers, service_config)
-                .map_err(|e| anyhow::anyhow!("failed to create FileParserService: {e}"))?,
-        );
+        let file_parser_service = Arc::new(FileParserService::new(parsers, service_config));
 
         // Store service for REST usage
         self.service.store(Some(file_parser_service));
