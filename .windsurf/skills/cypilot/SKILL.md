@@ -4,4 +4,4 @@ description: "Artifacts (PRD/DESIGN/ADR/DECOMPOSITION/SPEC) + checklists; determ
 ---
 
 
-ALWAYS open and follow `../../../.cypilot/skills/cypilot/SKILL.md`
+ALWAYS open and follow `@/.cypilot/skills/cypilot/SKILL.md`
