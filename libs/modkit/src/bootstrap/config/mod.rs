@@ -65,7 +65,7 @@ pub struct ExecutionConfig {
 }
 
 /// Module runtime kind.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimeKind {
     #[default]
@@ -82,8 +82,9 @@ pub struct AppConfig {
     pub server: ServerConfig,
     /// New typed database configuration (optional).
     pub database: Option<GlobalDatabaseConfig>,
-    /// Logging configuration (optional, uses defaults if None).
-    pub logging: Option<LoggingConfig>,
+    /// Logging configuration
+    #[serde(default = "default_logging_config")]
+    pub logging: LoggingConfig,
     /// Tracing configuration (optional, disabled if None).
     pub tracing: Option<TracingConfig>,
     /// Directory containing per-module YAML files (optional).
@@ -92,6 +93,20 @@ pub struct AppConfig {
     /// Per-module configuration bag: `module_name` → arbitrary JSON/YAML value.
     #[serde(default)]
     pub modules: HashMap<String, serde_json::Value>,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        let server = ServerConfig::default();
+        Self {
+            server,
+            database: None,
+            logging: default_logging_config(),
+            tracing: None, // Disabled by default
+            modules_dir: None,
+            modules: HashMap::new(),
+        }
+    }
 }
 
 impl ConfigProvider for AppConfig {
@@ -109,7 +124,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            home_dir: super::host::paths::default_home_dir().join(".hyperspot"),
+            home_dir: super::host::paths::default_home_dir().join(".cyberfabric"),
         }
     }
 }
@@ -183,25 +198,46 @@ mod optional_level_serde {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Section {
-    #[serde(
-        default = "optional_level_serde::default",
-        with = "optional_level_serde"
-    )]
-    pub console_level: Option<Level>,
-    #[serde(default)]
-    pub console_format: ConsoleFormat,
-    pub file: String, // "logs/api.log"
+pub struct SectionFile {
+    pub file: String,
     #[serde(
         default = "optional_level_serde::default",
         with = "optional_level_serde"
     )]
     pub file_level: Option<Level>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Section {
+    #[serde(default)]
+    pub console_format: ConsoleFormat,
+    #[serde(
+        default = "optional_level_serde::default",
+        with = "optional_level_serde"
+    )]
+    pub console_level: Option<Level>,
+    #[serde(flatten)]
+    pub section_file: Option<SectionFile>,
     pub max_age_days: Option<u32>, // Not implemented yet
     #[serde(default)]
     pub max_backups: Option<usize>, // How many files to keep
     #[serde(default)]
     pub max_size_mb: Option<u64>, // Max size of the file in MB
+}
+
+impl Section {
+    #[must_use]
+    pub fn file(&self) -> Option<&str> {
+        self.section_file
+            .as_ref()
+            .map(|f| f.file.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    #[must_use]
+    pub fn file_level(&self) -> Option<Level> {
+        self.section_file.as_ref().and_then(|f| f.file_level)
+    }
 }
 
 /// Create a default logging configuration.
@@ -212,32 +248,17 @@ pub fn default_logging_config() -> LoggingConfig {
         "default".to_owned(),
         Section {
             console_level: Some(Level::INFO),
+            section_file: Some(SectionFile {
+                file: "logs/cyberfabric.log".to_owned(),
+                file_level: Some(Level::DEBUG),
+            }),
             console_format: ConsoleFormat::default(),
-            file: "logs/hyperspot.log".to_owned(),
-            file_level: Some(Level::DEBUG),
             max_age_days: Some(7),
             max_backups: Some(3),
             max_size_mb: Some(100),
         },
     );
     logging
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        let server = ServerConfig::default();
-        Self {
-            server,
-            database: Some(GlobalDatabaseConfig {
-                servers: HashMap::new(),
-                auto_provision: None,
-            }),
-            logging: Some(default_logging_config()),
-            tracing: None, // Disabled by default
-            modules_dir: None,
-            modules: HashMap::new(),
-        }
-    }
 }
 
 impl AppConfig {
@@ -252,19 +273,11 @@ impl AppConfig {
             providers::{Env, Format, Serialized, Yaml},
         };
 
-        // For layered loading, start from a minimal base where optional sections are None,
-        // so they remain None unless explicitly provided by YAML/ENV.
-        let base = AppConfig {
-            server: ServerConfig::default(),
-            database: None,
-            logging: None,
-            tracing: None,
-            modules_dir: None,
-            modules: HashMap::new(),
-        };
-
+        // For layered loading, start from AppConfig::default() which provides logging
+        // defaults (via default_logging_config()); other optional sections (database,
+        // tracing, modules_dir) remain None unless overridden by YAML/ENV.
         let figment = Figment::new()
-            .merge(Serialized::defaults(base))
+            .merge(Serialized::defaults(AppConfig::default()))
             .merge(Yaml::file(config_path))
             // Example: APP__SERVER__PORT=8087 maps to server.port
             .merge(Env::prefixed("APP__").split("__"));
@@ -320,8 +333,7 @@ impl AppConfig {
     /// Apply overrides from command line arguments.
     pub fn apply_cli_overrides(&mut self, verbose: u8) {
         // Set logging level based on verbose flags for "default" section.
-        let logging = self.logging.get_or_insert_with(default_logging_config);
-        if let Some(default_section) = logging.get_mut("default") {
+        if let Some(default_section) = self.logging.get_mut("default") {
             default_section.console_level = match verbose {
                 0 => default_section.console_level, // keep
                 1 => Some(Level::DEBUG),
@@ -1086,7 +1098,7 @@ pub fn render_module_config_for_oop(
     Ok(RenderedModuleConfig {
         database,
         config,
-        logging,
+        logging: Some(logging),
         tracing,
     })
 }
@@ -1230,7 +1242,7 @@ mod tests {
 
     /// Helper: platform default subdirectory name.
     fn default_subdir() -> &'static str {
-        ".hyperspot"
+        ".cyberfabric"
     }
 
     #[test]
@@ -1238,19 +1250,15 @@ mod tests {
         let config = AppConfig::default();
 
         // Database defaults (simplified structure)
-        assert!(config.database.is_some());
-        let db = config.database.as_ref().unwrap();
-        assert!(db.servers.is_empty()); // Default config has no servers defined
-        assert_eq!(db.auto_provision, None);
+        assert!(config.database.is_none());
 
         // Logging defaults
-        assert!(config.logging.is_some());
-        let logging = config.logging.as_ref().unwrap();
+        let logging = config.logging;
         assert!(logging.contains_key("default"));
 
         let default_section = &logging["default"];
         assert_eq!(default_section.console_level, Some(Level::INFO));
-        assert_eq!(default_section.file, "logs/hyperspot.log");
+        assert_eq!(default_section.file().unwrap(), "logs/cyberfabric.log");
 
         // Modules bag is empty by default
         assert!(config.modules.is_empty());
@@ -1291,10 +1299,10 @@ logging:
         // let db = config.database.as_ref().unwrap();
 
         // logging parsed
-        let logging = config.logging.as_ref().unwrap();
+        let logging = &config.logging;
         let def = &logging["default"];
         assert_eq!(def.console_level, Some(Level::DEBUG));
-        assert_eq!(def.file, "logs/default.log");
+        assert_eq!(def.section_file.as_ref().unwrap().file, "logs/default.log");
     }
 
     #[test]
@@ -1333,7 +1341,6 @@ server:
 
         // Optional sections default to None
         assert!(config.database.is_none());
-        assert!(config.logging.is_none());
         assert!(config.modules.is_empty());
     }
 
@@ -1353,7 +1360,7 @@ server:
         // Port override
 
         // Verbose override affects logging
-        let logging = config.logging.as_ref().unwrap();
+        let logging = &config.logging;
         let default_section = &logging["default"];
         assert_eq!(default_section.console_level, Some(Level::TRACE));
     }
@@ -1376,7 +1383,7 @@ server:
 
             config.apply_cli_overrides(args.verbose);
 
-            let logging = config.logging.as_ref().unwrap();
+            let logging = &config.logging;
             let default_section = &logging["default"];
 
             if verbose_level == 0 {
@@ -1453,13 +1460,12 @@ logging:
         fs::write(&cfg_path, yaml).unwrap();
 
         let config = AppConfig::load_layered(&cfg_path).unwrap();
-        assert!(config.logging.is_some());
-        let logging = config.logging.as_ref().unwrap();
+        let logging = &config.logging;
         assert!(logging.contains_key("default"));
 
         let default_section = &logging["default"];
         assert_eq!(default_section.console_level, Some(Level::DEBUG));
-        assert_eq!(default_section.file_level, Some(Level::INFO));
+        assert_eq!(default_section.file_level(), Some(Level::INFO));
         // not calling init to avoid side effects in tests
     }
 

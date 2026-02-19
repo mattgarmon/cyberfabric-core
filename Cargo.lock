@@ -847,6 +847,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "utoipa",
 ]
@@ -1445,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "cf-oagw"
-version = "0.2.9"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1480,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "cf-oagw-sdk"
-version = "0.2.9"
+version = "0.2.12"
 dependencies = [
  "async-trait",
  "bytes",
