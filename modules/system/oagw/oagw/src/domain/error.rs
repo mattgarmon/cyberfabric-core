@@ -59,6 +59,24 @@ pub enum DomainError {
     #[error("{detail}")]
     RequestTimeout { detail: String, instance: String },
 
+    #[error("{detail}")]
+    StreamAborted { detail: String, instance: String },
+
+    #[error("{detail}")]
+    LinkUnavailable { detail: String, instance: String },
+
+    #[error("{detail}")]
+    CircuitBreakerOpen { detail: String, instance: String },
+
+    #[error("{detail}")]
+    IdleTimeout { detail: String, instance: String },
+
+    #[error("plugin not found: {detail}")]
+    PluginNotFound { detail: String },
+
+    #[error("plugin in use: {detail}")]
+    PluginInUse { detail: String },
+
     /// The request was denied by the authorization policy.
     #[error("access forbidden: {detail}")]
     Forbidden { detail: String },
