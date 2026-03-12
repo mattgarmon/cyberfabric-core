@@ -1,7 +1,7 @@
 use http::{Method, StatusCode};
 use oagw::test_support::{
     APIKEY_AUTH_PLUGIN_ID, AppHarness, MockBody, MockGuard, MockResponse, MockUpstream,
-    OAUTH2_CLIENT_CRED_AUTH_PLUGIN_ID, parse_resource_gts,
+    OAUTH2_CLIENT_CRED_AUTH_PLUGIN_ID,
 };
 use oagw_sdk::Body;
 use oagw_sdk::api::ErrorSource;
@@ -42,7 +42,6 @@ async fn setup_openai_mock() -> AppHarness {
         .expect_status(201)
         .await;
     let upstream_id = resp.json()["id"].as_str().unwrap().to_string();
-    let (_, upstream_uuid) = parse_resource_gts(&upstream_id).unwrap();
 
     for (methods, path) in [
         (vec!["POST", "GET"], "/v1/chat/completions"),
@@ -51,7 +50,7 @@ async fn setup_openai_mock() -> AppHarness {
         h.api_v1()
             .post_route()
             .with_body(serde_json::json!({
-                "upstream_id": upstream_uuid,
+                "upstream_id": &upstream_id,
                 "match": {
                     "http": {
                         "methods": methods,
@@ -1279,12 +1278,11 @@ async fn proxy_crud_invalidation_after_update() {
         .expect_status(201)
         .await;
     let upstream_id = resp.json()["id"].as_str().unwrap().to_string();
-    let (_, upstream_uuid) = parse_resource_gts(&upstream_id).unwrap();
 
     h.api_v1()
         .post_route()
         .with_body(json!({
-            "upstream_id": upstream_uuid,
+            "upstream_id": &upstream_id,
             "match": {
                 "http": {
                     "methods": ["GET"],
