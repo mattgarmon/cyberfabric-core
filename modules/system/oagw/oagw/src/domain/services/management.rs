@@ -241,6 +241,9 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             enabled: req.enabled,
         };
 
+        validate_route_determinism(&*self.routes, tenant_id, route.upstream_id, &route, None)
+            .await?;
+
         self.routes.create(route).await.map_err(DomainError::from)
     }
 
@@ -289,6 +292,15 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             priority: req.priority,
             enabled: req.enabled,
         };
+
+        validate_route_determinism(
+            &*self.routes,
+            tenant_id,
+            updated.upstream_id,
+            &updated,
+            Some(id),
+        )
+        .await?;
 
         self.routes.update(updated).await.map_err(DomainError::from)
     }
@@ -524,6 +536,68 @@ impl ControlPlaneServiceImpl {
 // ===========================================================================
 // Free functions — validation, permissions, visibility, config merge, alias
 // ===========================================================================
+
+/// Validate route match determinism (DESIGN §3.6): no two enabled routes under
+/// the same upstream may share `(path, priority)` for the same HTTP method.
+///
+/// `exclude_id` should be `Some(route.id)` on update so the route being
+/// replaced is not compared against itself.
+async fn validate_route_determinism(
+    routes: &dyn RouteRepository,
+    tenant_id: Uuid,
+    upstream_id: Uuid,
+    route: &Route,
+    exclude_id: Option<Uuid>,
+) -> Result<(), DomainError> {
+    if !route.enabled {
+        return Ok(());
+    }
+    let http = match &route.match_rules.http {
+        Some(h) => h,
+        None => return Ok(()),
+    };
+
+    let siblings = routes
+        .list(
+            tenant_id,
+            Some(upstream_id),
+            &ListQuery {
+                top: u32::MAX,
+                skip: 0,
+            },
+        )
+        .await
+        .map_err(DomainError::from)?;
+
+    for sibling in &siblings {
+        if Some(sibling.id) == exclude_id || sibling.id == route.id {
+            continue;
+        }
+        if !sibling.enabled {
+            continue;
+        }
+        if sibling.priority != route.priority {
+            continue;
+        }
+        let Some(sib_http) = &sibling.match_rules.http else {
+            continue;
+        };
+        if sib_http.path != http.path {
+            continue;
+        }
+        // Check for any overlapping method.
+        for m in &http.methods {
+            if sib_http.methods.contains(m) {
+                return Err(DomainError::conflict(format!(
+                    "route match conflict: an enabled route already exists for \
+                     method {m:?}, path {:?}, priority {} under this upstream",
+                    http.path, route.priority,
+                )));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Validate the endpoint list for a server configuration.
 ///
@@ -1218,12 +1292,27 @@ mod tests {
     }
 
     fn make_create_route(upstream_id: Uuid) -> CreateRouteRequest {
+        make_create_route_custom(
+            upstream_id,
+            vec![HttpMethod::Post],
+            "/v1/chat/completions",
+            0,
+        )
+    }
+
+    /// Helper to build a CreateRouteRequest with custom method, path, and priority.
+    fn make_create_route_custom(
+        upstream_id: Uuid,
+        methods: Vec<HttpMethod>,
+        path: &str,
+        priority: i32,
+    ) -> CreateRouteRequest {
         CreateRouteRequest {
             upstream_id,
             match_rules: MatchRules {
                 http: Some(HttpMatch {
-                    methods: vec![HttpMethod::Post],
-                    path: "/v1/chat/completions".into(),
+                    methods,
+                    path: path.into(),
                     query_allowlist: vec![],
                     path_suffix_mode: PathSuffixMode::Append,
                 }),
@@ -1232,7 +1321,7 @@ mod tests {
             plugins: None,
             rate_limit: None,
             tags: vec![],
-            priority: 0,
+            priority,
             enabled: true,
         }
     }
@@ -2463,7 +2552,7 @@ mod tests {
             .unwrap();
 
         // Child tries to update auth — should fail because ancestor is enforce.
-        let mut auth_req = make_update_upstream_hostname();
+        let mut auth_req = make_update_upstream_ip("openai");
         auth_req.auth = Some(AuthConfig {
             plugin_type: "oauth2".into(),
             sharing: SharingMode::Inherit,
@@ -2887,4 +2976,205 @@ mod tests {
         assert!(items.contains(&"my-plugin".to_string()));
     }
 
+    // -- Route match determinism tests (DESIGN §3.6) --
+
+    /// Build an UpdateRouteRequest from a CreateRouteRequest (shares all
+    /// match-relevant fields).
+    fn make_update_route(src: &CreateRouteRequest) -> UpdateRouteRequest {
+        UpdateRouteRequest {
+            match_rules: src.match_rules.clone(),
+            plugins: src.plugins.clone(),
+            rate_limit: src.rate_limit.clone(),
+            tags: src.tags.clone(),
+            priority: src.priority,
+            enabled: src.enabled,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_route_duplicate_method_path_priority_returns_conflict() {
+        let svc = make_service();
+        let ctx = test_ctx(Uuid::new_v4());
+        let u = svc
+            .create_upstream(&ctx, make_create_upstream(Some("openai")))
+            .await
+            .unwrap();
+
+        let req = make_create_route_custom(u.id, vec![HttpMethod::Post], "/v1/chat", 0);
+        svc.create_route(&ctx, req.clone()).await.unwrap();
+
+        let err = svc.create_route(&ctx, req).await.unwrap_err();
+        assert!(matches!(err, DomainError::Conflict { .. }));
+    }
+
+    #[tokio::test]
+    async fn create_route_overlapping_method_subset_returns_conflict() {
+        let svc = make_service();
+        let ctx = test_ctx(Uuid::new_v4());
+        let u = svc
+            .create_upstream(&ctx, make_create_upstream(Some("openai")))
+            .await
+            .unwrap();
+
+        svc.create_route(
+            &ctx,
+            make_create_route_custom(u.id, vec![HttpMethod::Post, HttpMethod::Put], "/v1/chat", 0),
+        )
+        .await
+        .unwrap();
+
+        // POST overlaps with the existing [POST, PUT] route.
+        let err = svc
+            .create_route(
+                &ctx,
+                make_create_route_custom(u.id, vec![HttpMethod::Post], "/v1/chat", 0),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Conflict { .. }));
+    }
+
+    #[tokio::test]
+    async fn create_route_different_method_same_path_priority_succeeds() {
+        let svc = make_service();
+        let ctx = test_ctx(Uuid::new_v4());
+        let u = svc
+            .create_upstream(&ctx, make_create_upstream(Some("openai")))
+            .await
+            .unwrap();
+
+        svc.create_route(
+            &ctx,
+            make_create_route_custom(u.id, vec![HttpMethod::Post], "/v1/chat", 0),
+        )
+        .await
+        .unwrap();
+
+        svc.create_route(
+            &ctx,
+            make_create_route_custom(u.id, vec![HttpMethod::Get], "/v1/chat", 0),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_route_same_method_different_path_succeeds() {
+        let svc = make_service();
+        let ctx = test_ctx(Uuid::new_v4());
+        let u = svc
+            .create_upstream(&ctx, make_create_upstream(Some("openai")))
+            .await
+            .unwrap();
+
+        svc.create_route(
+            &ctx,
+            make_create_route_custom(u.id, vec![HttpMethod::Post], "/v1/chat", 0),
+        )
+        .await
+        .unwrap();
+
+        svc.create_route(
+            &ctx,
+            make_create_route_custom(u.id, vec![HttpMethod::Post], "/v1/models", 0),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_route_same_method_path_different_priority_succeeds() {
+        let svc = make_service();
+        let ctx = test_ctx(Uuid::new_v4());
+        let u = svc
+            .create_upstream(&ctx, make_create_upstream(Some("openai")))
+            .await
+            .unwrap();
+
+        svc.create_route(
+            &ctx,
+            make_create_route_custom(u.id, vec![HttpMethod::Post], "/v1/chat", 0),
+        )
+        .await
+        .unwrap();
+
+        svc.create_route(
+            &ctx,
+            make_create_route_custom(u.id, vec![HttpMethod::Post], "/v1/chat", 10),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_route_disabled_duplicate_allowed() {
+        let svc = make_service();
+        let ctx = test_ctx(Uuid::new_v4());
+        let u = svc
+            .create_upstream(&ctx, make_create_upstream(Some("openai")))
+            .await
+            .unwrap();
+
+        svc.create_route(
+            &ctx,
+            make_create_route_custom(u.id, vec![HttpMethod::Post], "/v1/chat", 0),
+        )
+        .await
+        .unwrap();
+
+        let mut req = make_create_route_custom(u.id, vec![HttpMethod::Post], "/v1/chat", 0);
+        req.enabled = false;
+        svc.create_route(&ctx, req).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_route_into_conflict_returns_conflict() {
+        let svc = make_service();
+        let ctx = test_ctx(Uuid::new_v4());
+        let u = svc
+            .create_upstream(&ctx, make_create_upstream(Some("openai")))
+            .await
+            .unwrap();
+
+        svc.create_route(
+            &ctx,
+            make_create_route_custom(u.id, vec![HttpMethod::Post], "/v1/chat", 0),
+        )
+        .await
+        .unwrap();
+
+        let route_b = svc
+            .create_route(
+                &ctx,
+                make_create_route_custom(u.id, vec![HttpMethod::Post], "/v1/models", 0),
+            )
+            .await
+            .unwrap();
+
+        // Update B to match A's (method, path, priority) → conflict.
+        let conflict_req = make_create_route_custom(u.id, vec![HttpMethod::Post], "/v1/chat", 0);
+        let err = svc
+            .update_route(&ctx, route_b.id, make_update_route(&conflict_req))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Conflict { .. }));
+    }
+
+    #[tokio::test]
+    async fn update_route_same_match_no_self_conflict() {
+        let svc = make_service();
+        let ctx = test_ctx(Uuid::new_v4());
+        let u = svc
+            .create_upstream(&ctx, make_create_upstream(Some("openai")))
+            .await
+            .unwrap();
+
+        let create_req = make_create_route_custom(u.id, vec![HttpMethod::Post], "/v1/chat", 0);
+        let route = svc.create_route(&ctx, create_req.clone()).await.unwrap();
+
+        // Identical match — should not conflict with itself.
+        svc.update_route(&ctx, route.id, make_update_route(&create_req))
+            .await
+            .unwrap();
+    }
 }
