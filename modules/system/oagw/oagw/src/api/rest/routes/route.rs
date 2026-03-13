@@ -43,11 +43,11 @@ pub(super) fn register(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .standard_errors(openapi)
         .register(router, openapi);
 
-    // PATCH /oagw/v1/routes/{id} — Update route
-    router = OperationBuilder::patch("/oagw/v1/routes/{id}")
+    // PUT /oagw/v1/routes/{id} — Replace route
+    router = OperationBuilder::put("/oagw/v1/routes/{id}")
         .operation_id("oagw.update_route")
-        .summary("Update route")
-        .description("Partially update an existing route configuration")
+        .summary("Replace route")
+        .description("Replace an existing route configuration (full representation)")
         .tag("routes")
         .path_param("id", "Route GTS identifier")
         .authenticated()

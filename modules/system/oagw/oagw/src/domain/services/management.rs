@@ -149,76 +149,50 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
         req: UpdateUpstreamRequest,
     ) -> Result<Upstream, DomainError> {
         let tenant_id = ctx.subject_tenant_id();
-        let mut existing = self
+        let _existing = self
             .upstreams
             .get_by_id(tenant_id, id)
             .await
             .map_err(|_| DomainError::not_found("upstream", id))?;
 
-        // Apply partial update.
-        if let Some(server) = req.server {
-            validate_endpoints(&server.endpoints)?;
-            existing.server = server;
-        }
-        if let Some(protocol) = req.protocol {
-            existing.protocol = protocol;
-        }
-        if let Some(ref alias) = req.alias {
-            validate_alias(alias)?;
-        }
+        // Validate new endpoints (always provided in PUT).
+        validate_endpoints(&req.server.endpoints)?;
 
-        // Validate ancestor bind constraints if the resulting alias matches
-        // an ancestor upstream. Use the new alias if provided, else the existing.
-        let effective_alias = req.alias.as_deref().unwrap_or(&existing.alias);
+        // Build the replacement upstream, then derive alias.
+        let mut updated = Upstream {
+            id,
+            tenant_id,
+            alias: String::new(), // placeholder — resolved below
+            server: req.server,
+            protocol: req.protocol,
+            enabled: req.enabled,
+            auth: req.auth,
+            headers: req.headers,
+            plugins: req.plugins,
+            rate_limit: req.rate_limit,
+            tags: req.tags,
+        };
 
-        // Build post-update local state for bind validation. When an alias
-        // changes to match an ancestor, *existing* local overrides (auth,
-        // rate_limit, plugins) must also be validated — not just the fields
-        // present in the patch request.
-        let effective_auth = req.auth.as_ref().or(existing.auth.as_ref());
-        let effective_rate_limit = req.rate_limit.as_ref().or(existing.rate_limit.as_ref());
-        let effective_plugins = req.plugins.as_ref().or(existing.plugins.as_ref());
-        let has_overrides = effective_auth.is_some()
-            || effective_rate_limit.is_some()
-            || effective_plugins.is_some();
+        let alias = req
+            .alias
+            .unwrap_or_else(|| generate_alias(&updated));
+        validate_alias(&alias)?;
+        updated.alias = alias.clone();
 
-        if has_overrides || req.alias.is_some() {
-            self.validate_ancestor_bind(
-                ctx,
-                effective_alias,
-                &BindOverrides {
-                    auth: effective_auth,
-                    rate_limit: effective_rate_limit,
-                    plugins: effective_plugins,
-                },
-            )
-            .await?;
-        }
-
-        if let Some(alias) = req.alias {
-            existing.alias = alias;
-        }
-        if let Some(auth) = req.auth {
-            existing.auth = Some(auth);
-        }
-        if let Some(headers) = req.headers {
-            existing.headers = Some(headers);
-        }
-        if let Some(plugins) = req.plugins {
-            existing.plugins = Some(plugins);
-        }
-        if let Some(rate_limit) = req.rate_limit {
-            existing.rate_limit = Some(rate_limit);
-        }
-        if let Some(tags) = req.tags {
-            existing.tags = tags;
-        }
-        if let Some(enabled) = req.enabled {
-            existing.enabled = enabled;
-        }
+        // Validate ancestor bind constraints.
+        self.validate_ancestor_bind(
+            ctx,
+            &alias,
+            &BindOverrides {
+                auth: updated.auth.as_ref(),
+                rate_limit: updated.rate_limit.as_ref(),
+                plugins: updated.plugins.as_ref(),
+            },
+        )
+        .await?;
 
         self.upstreams
-            .update(existing)
+            .update(updated)
             .await
             .map_err(DomainError::from)
     }
@@ -298,35 +272,25 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
         req: UpdateRouteRequest,
     ) -> Result<Route, DomainError> {
         let tenant_id = ctx.subject_tenant_id();
-        let mut existing = self
+        let existing = self
             .routes
             .get_by_id(tenant_id, id)
             .await
             .map_err(|_| DomainError::not_found("route", id))?;
 
-        if let Some(match_rules) = req.match_rules {
-            existing.match_rules = match_rules;
-        }
-        if let Some(plugins) = req.plugins {
-            existing.plugins = Some(plugins);
-        }
-        if let Some(rate_limit) = req.rate_limit {
-            existing.rate_limit = Some(rate_limit);
-        }
-        if let Some(tags) = req.tags {
-            existing.tags = tags;
-        }
-        if let Some(priority) = req.priority {
-            existing.priority = priority;
-        }
-        if let Some(enabled) = req.enabled {
-            existing.enabled = enabled;
-        }
+        let updated = Route {
+            id,
+            tenant_id,
+            upstream_id: existing.upstream_id,
+            match_rules: req.match_rules,
+            plugins: req.plugins,
+            rate_limit: req.rate_limit,
+            tags: req.tags,
+            priority: req.priority,
+            enabled: req.enabled,
+        };
 
-        self.routes
-            .update(existing)
-            .await
-            .map_err(DomainError::from)
+        self.routes.update(updated).await.map_err(DomainError::from)
     }
 
     async fn delete_route(&self, ctx: &SecurityContext, id: Uuid) -> Result<(), DomainError> {
@@ -1211,6 +1175,48 @@ mod tests {
         }
     }
 
+    /// Full update request for an IP-based upstream (mirrors make_create_upstream_ip).
+    fn make_update_upstream_ip(alias: &str) -> UpdateUpstreamRequest {
+        UpdateUpstreamRequest {
+            server: Server {
+                endpoints: vec![Endpoint {
+                    scheme: Scheme::Https,
+                    host: "10.0.0.1".into(),
+                    port: 443,
+                }],
+            },
+            protocol: "gts.x.core.oagw.protocol.v1~x.core.oagw.http.v1".into(),
+            alias: Some(alias.into()),
+            auth: None,
+            headers: None,
+            plugins: None,
+            rate_limit: None,
+            tags: vec![],
+            enabled: true,
+        }
+    }
+
+    /// Full update request for a hostname-based upstream (mirrors make_create_upstream_hostname).
+    fn make_update_upstream_hostname() -> UpdateUpstreamRequest {
+        UpdateUpstreamRequest {
+            server: Server {
+                endpoints: vec![Endpoint {
+                    scheme: Scheme::Https,
+                    host: "api.openai.com".into(),
+                    port: 443,
+                }],
+            },
+            protocol: "gts.x.core.oagw.protocol.v1~x.core.oagw.http.v1".into(),
+            alias: None,
+            auth: None,
+            headers: None,
+            plugins: None,
+            rate_limit: None,
+            tags: vec![],
+            enabled: true,
+        }
+    }
+
     fn make_create_route(upstream_id: Uuid) -> CreateRouteRequest {
         CreateRouteRequest {
             upstream_id,
@@ -1250,14 +1256,7 @@ mod tests {
 
         // Update
         let updated = svc
-            .update_upstream(
-                &ctx,
-                u.id,
-                UpdateUpstreamRequest {
-                    alias: Some("openai-v2".into()),
-                    ..Default::default()
-                },
-            )
+            .update_upstream(&ctx, u.id, make_update_upstream_ip("openai-v2"))
             .await
             .unwrap();
         assert_eq!(updated.alias, "openai-v2");
@@ -1418,16 +1417,9 @@ mod tests {
             .unwrap();
 
         // Disable the upstream.
-        svc.update_upstream(
-            &ctx,
-            u.id,
-            UpdateUpstreamRequest {
-                enabled: Some(false),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+        let mut disable_req = make_update_upstream_ip("openai");
+        disable_req.enabled = false;
+        svc.update_upstream(&ctx, u.id, disable_req).await.unwrap();
 
         let chain = svc.build_tenant_chain(&ctx).await.unwrap();
         let err = svc
@@ -2471,19 +2463,14 @@ mod tests {
             .unwrap();
 
         // Child tries to update auth — should fail because ancestor is enforce.
+        let mut auth_req = make_update_upstream_hostname();
+        auth_req.auth = Some(AuthConfig {
+            plugin_type: "oauth2".into(),
+            sharing: SharingMode::Inherit,
+            config: None,
+        });
         let err = svc
-            .update_upstream(
-                &child_ctx,
-                child_upstream.id,
-                UpdateUpstreamRequest {
-                    auth: Some(AuthConfig {
-                        plugin_type: "oauth2".into(),
-                        sharing: SharingMode::Inherit,
-                        config: None,
-                    }),
-                    ..Default::default()
-                },
-            )
+            .update_upstream(&child_ctx, child_upstream.id, auth_req)
             .await
             .unwrap_err();
         match err {
@@ -2526,10 +2513,7 @@ mod tests {
             .update_upstream(
                 &child_ctx,
                 child_upstream.id,
-                UpdateUpstreamRequest {
-                    alias: Some("openai".into()),
-                    ..Default::default()
-                },
+                make_update_upstream_ip("openai"),
             )
             .await
             .unwrap();
@@ -2564,16 +2548,15 @@ mod tests {
         let child_upstream = svc.create_upstream(&child_ctx, child_req).await.unwrap();
 
         // Alias-only update to match ancestor — must fail because the child's
-        // existing auth override conflicts with the ancestor's enforce mode.
+        // auth override conflicts with the ancestor's enforce mode.
+        let mut alias_req = make_update_upstream_ip("openai");
+        alias_req.auth = Some(AuthConfig {
+            plugin_type: "oauth2".into(),
+            sharing: SharingMode::Inherit,
+            config: None,
+        });
         let err = svc
-            .update_upstream(
-                &child_ctx,
-                child_upstream.id,
-                UpdateUpstreamRequest {
-                    alias: Some("openai".into()),
-                    ..Default::default()
-                },
-            )
+            .update_upstream(&child_ctx, child_upstream.id, alias_req)
             .await
             .unwrap_err();
         match err {
@@ -2602,19 +2585,14 @@ mod tests {
             .unwrap();
 
         // Update auth — no ancestor match, should succeed without permission checks.
+        let mut auth_req = make_update_upstream_ip("my-svc");
+        auth_req.auth = Some(AuthConfig {
+            plugin_type: "oauth2".into(),
+            sharing: SharingMode::Inherit,
+            config: None,
+        });
         let updated = svc
-            .update_upstream(
-                &child_ctx,
-                child_upstream.id,
-                UpdateUpstreamRequest {
-                    auth: Some(AuthConfig {
-                        plugin_type: "oauth2".into(),
-                        sharing: SharingMode::Inherit,
-                        config: None,
-                    }),
-                    ..Default::default()
-                },
-            )
+            .update_upstream(&child_ctx, child_upstream.id, auth_req)
             .await
             .unwrap();
         assert_eq!(updated.auth.unwrap().plugin_type, "oauth2");
@@ -2908,4 +2886,5 @@ mod tests {
         assert!(items.contains(&"audit-log".to_string()));
         assert!(items.contains(&"my-plugin".to_string()));
     }
+
 }
